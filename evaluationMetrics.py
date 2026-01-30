@@ -423,10 +423,29 @@ def compare_partial_answers(question, reference_keywords, agent_answer, api_key,
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are an evaluator. Your job is to check if each reference keyword/phrase "
-                "is present or semantically satisfied in the student's answer. "
-                "Answer in JSON only, with keys equal to the keywords and values True/False."
+            "content": (f"""
+              You will be given:
+            1.	Task description
+            2.	A list of reference keywords/phrases that represent the essential components of a correct answer
+            3.	The agent’s final answer
+            
+            Your goal is to check whether the agent’s final answer semantically satisfies each required keyword/phrase. Semantic equivalence means that the agent’s answer conveys the same meaning as the reference keyword/phrase, even if the wording is different.
+            Your output should be in a JSON format:
+            {{"keyword1": true, "keyword2": false}}
+            Rules:  
+            1.	Match by meaning, not surface form.  
+            2.	Be case-insensitive.  
+            Example:
+            Task: Tell me the reasons why customers like Circe hooded fleece.
+            List of phrases: ["Warm and comfortable", "True to size"]
+            The agent’s final answer: ["Warm and comfortable"]
+            Output:
+            {{"Warm and comfortable": true, "True to size": false}}
+            
+            Evaluation Steps:
+            1.	Read the task, the list of phrases, and the agent’s final answer carefully.
+            2.	For each reference keyword/phrase, decide whether its meaning appears in the agent’s final answer.
+            3.	Return a JSON object where each key is a reference keyword/phrase and each value is true/false accordingly."""
             ),
         },
         {
@@ -598,22 +617,35 @@ def step_success(human_df, agent_df, api_key, model_name):
 
         # Build the prompt
         prompt = f"""
-        You are comparing two trajectories: agent steps and human steps, in **meaning**, even if the wording is slightly different.
-        For example: "Type hello in the text search box" and "Type hello in the search box" are the same action.
-        Rules to follow:
-        1. Each human step can match exactly once with an agent step.
-        2. If the agent repeats a step more times than the human, ignore it because you have already counted the first occurance. 
-        3. If a human repeats an action, the agent must repeat it the same number of times.
+        You will be provided with two trajectories: agent steps and human gold steps, both attempting to complete the same task. 
+        Your task is to compare the two trajectories and identify which steps from the agent trajectory are semantically similar to the human trajectory.  You must meet the following conditions for semantic similarity:
+        1. Minor textual variations such as differences in casing ('Design' vs 'design'), extra/missing spaces, or punctuation should be ignored as long as the core identity and meaning are preserved.
+        2. Major mismatch in meaning or details (e.g., 'Byte Blaze' vs 'Lukas Opp', or different dates)
         
-        Example 1: 
-        Human Trajectory: Add item A to cart, Add item A to cart. 
-        Agent Trajectory: Add item A to cart. 
-        Output: matching_steps: ["Add item A to cart"] (Agent is missing one repetition)
+        You must follow these rules:
+        1. Each human gold step can match exactly once with an agent step.
+        2. If a human repeats an action, the agent must repeat it the same number of times.
+    
+        Semantic Equivalence means both actions express the same intent. Your output must be a list of the actual matching agent steps, following to the rules above. 
         
+        Example 1:         
+                Human Trajectory: Add item A to cart, Add item A to cart.
+                Agent Trajectory: Add item A to cart. 
+                Output: matching\_steps: ["Add item A to cart"] (Agent is missing one repetition)
+            
         Example 2:
-        Human Trajectory: Add item B to cart. 
-        Agent Trajectory: Add item B to cart, Add item B to cart. 
-        Output: matching_steps: ["Add item B to cart"] (Human performed the step one time)
+                Human Trajectory: Add item B to cart.  
+                Agent Trajectory: Add item B to cart, Add item B to cart.    
+                Output: matching\_steps: ["Add item B to cart"] (Human performed the step one time)
+                
+        
+        Evaluation Steps: 
+        1. Read both trajectories carefully.        
+        2. Iterate through the human gold steps in order. For each human gold step find the first agent step (from the remaining unmatched steps) that is semantically equivalent to this human gold step.      
+        3. Apply the matching rules     
+        4. Record matches.    
+        5. Return a list of the matching agent steps.
+
 
         Human steps:
         {human_steps}
@@ -706,19 +738,37 @@ def repetitiveness(agent_df, api_key, model_name):
             continue
 
         prompt = f"""
-        You are given a sequence of agent actions for a single task:
-        {actions}
-        Identify all **adjacent repetitive actions**.
-
+        You will be given a trajectory containing a sequence of agent actions. Your goal is to identify adjacent repetitive actions.
+        A repetitive action is an action that repeats the meaning of the previous action, even if the wording is slightly different.     
+        Your output must include:
+        1. The number of repetitive actions in the trajectory.
+        2. A list of the actions that were identified as repetitions (each represented as a string).
+    
         Rules:
-        1. A repetitive action is one that repeats the previous action in **meaning**, even if the wording is slightly different.
-        For example: "Type hello in the text search box" and "Type hello in the search box" are the same action.
-        2. Only count repetitions that are **adjacent** in the sequence.  
-        3. Ignore actions that are similar but not immediately following the previous action. 
-        Only consider repetitions of the same action. For example, for the sequence [A, B, B, C, A]:
-          - The second B is repetitive
-          - The second A is *not* repetitive
-
+        1. Only count actions that repeat the immediately preceding action.
+        2. Ignore actions that are similar but do not appear right after each other.
+        3. A repetition is based on semantic equivalence, not exact wording.
+        
+        Examples
+        Example 1:
+        Input: [“Type hello in the text search box”, “Type hello in the search box”]
+        Output: {1, ["Type hello in the text search box"]}
+        Example 2:
+        Input: [A, B, B, C, A]
+        * The second B is repetitive
+        * The second A is not repetitive
+        Output: {1, ["B"]}
+        
+        Evaluation Steps: 
+        1. Read the trajectory carefully.
+        2. Iterate through the steps in order and compare each action to the action immediately before it.
+        3. Apply the repetition rules.
+        4. For every repetition found, increment the counter and append the repeated action to the list.
+        
+        
+        a sequence of agent actions for a single task:
+        {actions}
+        
         Return the result in JSON format:
         {{
             "same_actions_count": <number of repetitive actions>,
@@ -788,12 +838,6 @@ def recovery(human_df, agent_df, api_key, model_name, semantic_similarity_thresh
         semantic_similarity_threshold (float): Score required for a semantic match (0.0-1.0).
         max_agent_sequence_length (int): Max number of agent steps to group for comparison.
 
-    Returns:
-        dict: A dictionary where keys are 'Task No' and values are dictionaries
-              containing 'Recovery_Success_Rate', 'Average_Recovery_Cost_Steps',
-              'Total_Deviation_Incidents', 'Total_Successful_Recoveries',
-              'Total_Recovery_Cost_Steps'.
-              Returns an empty dict if no common tasks.
     """
     logging.info(f"\n--- Calculating Trajectory Re-alignment Score ---")
 
@@ -936,22 +980,6 @@ def recovery(human_df, agent_df, api_key, model_name, semantic_similarity_thresh
     return realignment_results
 
 def partial_success(agent_df, keywords_df, api_key, model_name):
-    """
-    Measures how well the agent’s final answer matches the expected reference answers per task.
-    Uses LLM semantic similarity only (via compare_partial_answers).
-
-    Output (dict per task):
-    {
-        task_no: {
-            "final_answer": str,
-            "total_reference_answers": int,
-            "matched_reference_answers": int,
-            "score": float,
-            "results": {ref1: True/False, ref2: True/False, ...}
-        },
-        ...
-    }
-    """
 
     logging.info("\n--- Calculating Partial Success Rate ---")
 
